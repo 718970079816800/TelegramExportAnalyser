@@ -1,5 +1,6 @@
 #Analyse Telegram Export Folder(TEF)
 #Store time, group_name, name, message, and hash in mysql database.
+#Discover Telegram group links in message, and store links in mysql databases.
 
 #Mysql database name:'tg_dialogues'
 #Mysql table name:'dialogues'
@@ -7,14 +8,58 @@
 #Table column:'group_name':varchar(50)
 #Table column:'name':varchar(50)
 #Table column:'message':varchar(9999)
-#Table column:'hash':varchar(32)
+#Table column:'hash':varchar(32) #make an unique index on this column
+
+#Mysql database name:'tg_dialogues'
+#Mysql table name:'groups'
+#Table column:'link':varchar(99) #make an unique index on this cloumn
+#Table column:'title':varchar(999)
+#Table column:'members':varchar(99)
+#Table column:'description':varchar(999)
+#Table column:'joined':BOOLEAN
 
 import codecs, re, os, hashlib, time
+import requests
 import pymysql
 from bs4 import BeautifulSoup
 from datetime import datetime as dt
 
-TEF = r'E:\TG_Export_201906-202002'
+TEF = r'E:\TG_Export_202002-202003'
+
+class TGGroup(object):
+    
+    link = ''
+    title = ''
+    page_extra = ''
+    page_description = ''
+    tof = True
+
+    def __init__(self, link):
+        self.link = link
+
+    def verify(self):
+        t = re.compile('^Telegram: ')
+        try:
+            r = requests.get(self.link)
+            soup = BeautifulSoup(r.text,'lxml')
+            try:
+                self.title = soup.find('meta', attrs={'property':'og:title'}).attrs['content']
+            except AttributeError:
+                self.title = 'None'
+            finally:
+                try:
+                    self.page_extra = soup.find('div', attrs={'class':'tgme_page_extra'}).string
+                except AttributeError:
+                    self.page_extra = 'None'
+                finally:
+                    try:
+                        self.page_description = soup.find('div', attrs={'class':'tgme_page_description', 'dir':'auto'}).get_text()
+                    except AttributeError:
+                        self.page_description = 'None'
+            if t.match(self.title):
+                self.tof = False
+        except Exception as e:
+            print(e)
 
 def list_html_files(rootdir):
 #Return all html files in a specified dir including sub dir.
@@ -56,10 +101,24 @@ def filter_html_files(rootdir):
                 f.write(unformatted+'\n')
                 return html
 
+def extract_grouplink(text):
+    l = []
+    link1 = re.compile('https://t.me/[A-Za-z0-9_]+')
+    link2 = re.compile('https://t.me/joinchat/[A-Za-z0-9_-]{22}')
+    if link1.findall(text):
+        for i in range(len(link1.findall(text))):
+            l.append(link1.findall(text)[i])
+    if link2.findall(text):
+        for i in range(len(link2.findall(text))):
+            l.append(link2.findall(text)[i])
+    l = list(set(l))
+    return l
+
 def extract_diaglog(rootdir):
     imp = 0
     dup = 0
     err = 0
+    grp = []
     for htmlpage in list_html_files(rootdir):
         try:
             soup = BeautifulSoup(open(htmlpage,encoding='utf8'),'lxml')
@@ -88,6 +147,12 @@ def extract_diaglog(rootdir):
                         'Name:'+name+'\n'+
                         'Message:'+text+'\n')   
                 _hash = hashlib.md5(_str.encode('utf8')).hexdigest()
+
+                if len(extract_grouplink(text)) == 0:
+                    pass
+                else:
+                    for i in extract_grouplink(text):
+                        grp.append(i)
 
                 sql = ("INSERT \
                         INTO \
@@ -128,9 +193,49 @@ def extract_diaglog(rootdir):
             print(e)
             time.sleep(10)
             pass
+        except UnicodeDecodeError as e:
+            print(e)
+            time.sleep(10)
+            pass
     print('Imported count: ' + str(imp))
     print('Duplicated count: ' + str(dup))
     print('Warning count: ' + str(err))
-    
+    grp = list(set(grp))
+    return grp
+
+def import_grplinks(text):
+    a = TGGroup(text.strip())
+    a.verify()
+    if a.tof:
+        sql = ("INSERT INTO \
+                grouplinks\
+                (link, \
+                 title, \
+                 members, \
+                 description, \
+                 joined) VALUES \
+                 ('%s', '%s', '%s', '%s', '%i')" % \
+                (pymysql.escape_string(text), \
+                 pymysql.escape_string(a.title), \
+                 pymysql.escape_string(a.page_extra), \
+                 pymysql.escape_string(a.page_description), \
+                 0))
+        try:
+            db = pymysql.connect(host="127.0.0.1", \
+                                 port=3306, \
+                                 user="root", \
+                                 passwd="", \
+                                 db="tg_dialogues", \
+                                 charset='utf8mb4')
+            cursor = db.cursor()
+            cursor.execute(sql)
+            db.commit()
+            db.close()
+        except Exception as e:
+            print(e)
+        
+
 if __name__ == '__main__':
-    extract_diaglog(TEF)
+    grplinks = extract_diaglog(TEF)
+    for link in grplinks:
+        import_grplinks(link)
